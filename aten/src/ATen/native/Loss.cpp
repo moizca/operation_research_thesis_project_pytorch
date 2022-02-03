@@ -25,18 +25,26 @@ namespace {
 namespace at {
 namespace meta {
 
-TORCH_META_FUNC(smooth_l1_loss)
-(const Tensor& input, const Tensor& target, const int64_t reduction, double beta) {
-  TORCH_CHECK(beta >= 0, "smooth_l1_loss does not support negative values for beta.")
+void meta_func_loss(impl::MetaBase& meta, const Tensor& input, const Tensor& target, int64_t reduction) {
   // TODO: Reduce this extra TensorIterator construction for Reduction::Mean & Sum.
   // We do another TensorIterator construction in the IMPL for the two cases.
-  build_borrowing_binary_op(maybe_get_output(), input, target);
+  TensorIterator::borrowing_binary_op(meta.maybe_get_output(), input, target);
   if (reduction == Reduction::None) {
     return;
   }
-
   TORCH_INTERNAL_ASSERT(reduction == Reduction::Mean || reduction == Reduction::Sum);
-  maybe_get_output().resize_({});
+  meta.maybe_get_output().resize_({});
+}
+
+TORCH_META_FUNC(smooth_l1_loss)
+(const Tensor& input, const Tensor& target, const int64_t reduction, double beta) {
+  TORCH_CHECK(beta >= 0, "smooth_l1_loss does not support negative values for beta.")
+  meta_func_loss(*this, input, target, reduction);
+}
+
+TORCH_META_FUNC(mse_loss)
+(const Tensor& input, const Tensor& target, int64_t reduction) {
+  meta_func_loss(*this, input, target, reduction);
 }
 
 } // namespace meta
@@ -67,6 +75,22 @@ TORCH_IMPL_FUNC(smooth_l1_loss_out)
     }
   } else {
     smooth_l1_stub(device_type(), *this, beta);
+  }
+}
+
+TORCH_IMPL_FUNC(mse_loss_out)
+(const Tensor& input, const Tensor& target, int64_t reduction, const Tensor& result) {
+  if (reduction != Reduction::None) {
+    Tensor loss;
+    auto iter = TensorIterator::borrowing_binary_op(loss, input, target);
+    mse_stub(iter.device_type(), iter);
+    if (reduction == Reduction::Mean) {
+      at::mean_out(const_cast<Tensor&>(result), iter.output(), IntArrayRef{});
+    } else {
+      at::sum_out(const_cast<Tensor&>(result), iter.output(), IntArrayRef{});
+    }
+  } else {
+    mse_stub(device_type(), *this);
   }
 }
 
@@ -454,30 +478,6 @@ Tensor& huber_loss_backward_out(const Tensor& grad_output, const Tensor& input, 
   return grad_input;
 }
 
-Tensor mse_loss(const Tensor& input, const Tensor& target, int64_t reduction) {
-  Tensor loss;
-  auto iter = TensorIterator::borrowing_binary_op(loss, input, target);
-  mse_stub(iter.device_type(), iter);
-  return apply_loss_reduction(iter.output(), reduction);
-}
-
-Tensor& mse_loss_out(const Tensor& input, const Tensor& target, int64_t reduction, Tensor&result) {
-  if (reduction != Reduction::None) {
-    Tensor loss;
-    auto iter = TensorIterator::borrowing_binary_op(loss, input, target);
-    mse_stub(iter.device_type(), iter);
-    if (reduction == Reduction::Mean) {
-      at::mean_out(result, iter.output(), 0);
-    } else {
-      at::sum_out(result, iter.output(), 0);
-    }
-  } else {
-    auto iter = TensorIterator::borrowing_binary_op(result, input, target);
-    mse_stub(iter.device_type(), iter);
-  }
-  return result;
-}
-
 Tensor mse_loss_backward(const Tensor& grad_output, const Tensor& input, const Tensor& target, int64_t reduction) {
   Tensor grad_input = at::zeros_like(input, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
   return at::mse_loss_backward_out(grad_input, grad_output, input, target, reduction);
@@ -529,3 +529,5 @@ Tensor& l1_loss_backward_out(const Tensor& grad_output,
 }
 
 }}  // namespace at::native
+
+
